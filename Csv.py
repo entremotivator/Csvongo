@@ -33,11 +33,14 @@ if uploaded_file:
         st.subheader("🔑 Google Sheets Authentication")
         service_account_file = st.file_uploader("Upload Google Service Account JSON", type=["json"])
 
-        if service_account_file is not None:
+        if service_account_file:
             creds_dict = json.load(service_account_file)
             creds = Credentials.from_service_account_info(
                 creds_dict,
-                scopes=["https://www.googleapis.com/auth/spreadsheets"]
+                scopes=[
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive"  # Needed to create new sheets
+                ]
             )
             client = gspread.authorize(creds)
 
@@ -46,8 +49,10 @@ if uploaded_file:
 
             if st.button("🚀 Upload Workbook to Google Sheets"):
                 try:
+                    # Open or create spreadsheet
                     try:
                         spreadsheet = client.open(sheet_name)
+                        st.info("Opened existing Google Sheet.")
                     except gspread.SpreadsheetNotFound:
                         spreadsheet = client.create(sheet_name)
                         st.info("Created new Google Sheet.")
@@ -57,14 +62,20 @@ if uploaded_file:
                         df = pd.read_excel(xls, sheet_name=sheet, dtype=str).fillna("")
                         df = clean_for_gsheets(df)
 
-                        # Create or clear worksheet
+                        # Create or overwrite worksheet
                         try:
                             worksheet = spreadsheet.worksheet(sheet)
                             worksheet.clear()
+                            st.info(f"Cleared existing sheet: {sheet}")
                         except gspread.WorksheetNotFound:
-                            worksheet = spreadsheet.add_worksheet(title=sheet, rows=str(len(df)+10), cols=str(len(df.columns)+5))
+                            worksheet = spreadsheet.add_worksheet(
+                                title=sheet,
+                                rows=str(len(df)+10),
+                                cols=str(len(df.columns)+5)
+                            )
+                            st.info(f"Created new sheet: {sheet}")
 
-                        # Upload cleaned data
+                        # Update worksheet with new data
                         worksheet.update([df.columns.values.tolist()] + df.values.tolist())
 
                     st.success("✅ Entire workbook uploaded successfully!")
