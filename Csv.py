@@ -1151,6 +1151,7 @@ def process_files_to_sheets(client: gspread.Client, file_data: Dict[str, Any], o
     except:
         pass
 
+# Show instructions when no credentials are uploaded
 else:
     # Show instructions when no credentials are uploaded
     st.markdown("""
