@@ -57,6 +57,10 @@ if uploaded_file:
                         spreadsheet = client.create(sheet_name)
                         st.info("Created new Google Sheet.")
 
+                    # Auto-share with entremotivator@gmail.com
+                    spreadsheet.share('entremotivator@gmail.com', perm_type='user', role='writer')
+                    st.success("📨 Shared spreadsheet with entremotivator@gmail.com")
+
                     # Loop through all Excel sheets
                     for sheet in xls.sheet_names:
                         df = pd.read_excel(xls, sheet_name=sheet, dtype=str).fillna("")
@@ -78,7 +82,10 @@ if uploaded_file:
                         # Update worksheet with new data
                         worksheet.update([df.columns.values.tolist()] + df.values.tolist())
 
-                    st.success("✅ Entire workbook uploaded successfully!")
+                    # Display spreadsheet link
+                    spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
+                    st.success(f"✅ Entire workbook uploaded successfully! [Open Spreadsheet]({spreadsheet_url})")
+                    
                 except Exception as e:
                     st.error(f"❌ Failed to upload: {e}")
 
