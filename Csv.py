@@ -56,7 +56,7 @@ st.markdown("""
         padding: 1.5rem;
         border-radius: 10px;
         margin: 1rem 0;
-        box-shadow: 0 4px 15px rgba(40, 167, 69, 0.2);
+        box_shadow: 0 4px 15px rgba(40, 167, 69, 0.2);
     }
     
     .error-box {
@@ -558,8 +558,8 @@ def upload_dataframe_to_sheets(client: gspread.Client, df: pd.DataFrame, sheet_n
         if options.get("auto_resize"):
             worksheet.freeze(rows=1)
             worksheet.format('A1:ZZZ1', {'textFormat': {'bold': True}})
-            worksheet.columns_auto_resize(1, total_cols)
-        
+            worksheet.columns_auto_resize(0, total_cols - 1)
+
         if options.get("freeze_header"):
             worksheet.freeze(rows=1)
 
@@ -567,146 +567,191 @@ def upload_dataframe_to_sheets(client: gspread.Client, df: pd.DataFrame, sheet_n
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             worksheet.update_cell(total_rows + 2, 1, f"Processed on: {timestamp}")
 
+        st.success(f"✅ Successfully uploaded '{sheet_name}' to Google Sheet: {spreadsheet.url}")
+        logger.info(f"Uploaded '{sheet_name}' to {spreadsheet.url}")
         return spreadsheet.url
 
-    except gspread.exceptions.APIError as e:
-        st.error(f"Google Sheets API Error: {e.response['content']}")
-        raise
     except Exception as e:
-        st.error(f"An unexpected error occurred during upload: {str(e)}")
-        raise
+        st.error(f"❌ Failed to upload '{sheet_name}' to Google Sheets: {str(e)}")
+        logger.error(f"Error uploading '{sheet_name}': {str(e)}")
+        return ""
 
-def display_file_preview(file_content: bytes, file_type: str):
-    """Display a preview of the uploaded file content"""
-    st.subheader("File Preview")
+def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dict[str, pd.DataFrame], workbook_name: str, options: Dict[str, Any], folder_id: str = "") -> str:
+    """Uploads multiple Pandas DataFrames to a single new Google Sheet workbook, each as a separate worksheet.
+    The first DataFrame in the dictionary will be uploaded to the default 'Sheet1' worksheet, which will be renamed.
+    Subsequent DataFrames will be added as new worksheets.
+    """
     try:
-        if file_type == ".csv":
-            df_preview = pd.read_csv(io.BytesIO(file_content))
-        elif file_type in [".xlsx", ".xls"]:
-            df_preview = pd.read_excel(io.BytesIO(file_content))
-        else:
-            st.warning("Cannot display preview for this file type.")
-            return
+        # Create a new spreadsheet (workbook)
+        spreadsheet = client.create(workbook_name)
+        if folder_id:
+            client.drive.authorize()
+            client.drive.files.update(fileId=spreadsheet.id, addParents=folder_id, removeParents='root').execute()
 
-        st.dataframe(df_preview.head(), use_container_width=True)
+        # Share the spreadsheet
+        spreadsheet.share(options["share_email"], perm_type='user', role=options["permission_level"], notify=options["notify_email"])
+
+        first_sheet_name = list(dataframes.keys())[0]
+        first_df = dataframes[first_sheet_name]
+
+        # Rename the default 'Sheet1' and upload the first DataFrame
+        worksheet = spreadsheet.worksheet("Sheet1")
+        worksheet.update_title(first_sheet_name)
+        
+        processed_df = format_dataframe(first_df, options)
+        worksheet.update([processed_df.columns.values.tolist()] + processed_df.values.tolist())
+        
+        # Apply formatting options for the first sheet
+        if options.get("auto_resize"):
+            worksheet.freeze(rows=1)
+            worksheet.format('A1:ZZZ1', {'textFormat': {'bold': True}})
+            worksheet.columns_auto_resize(0, len(processed_df.columns) - 1)
+        if options.get("freeze_header"):
+            worksheet.freeze(rows=1)
+        if options.get("add_timestamp"):
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            worksheet.update_cell(len(processed_df) + 2, 1, f"Processed on: {timestamp}")
+
+        st.session_state.progress_bar.progress(1 / len(dataframes), text=f"Uploading sheet '{first_sheet_name}' to Google Sheet")
+
+        # Add and upload subsequent DataFrames as new worksheets
+        for i, (sheet_name, df) in enumerate(list(dataframes.items())[1:]):
+            new_worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
+            processed_df = format_dataframe(df, options)
+            new_worksheet.update([processed_df.columns.values.tolist()] + processed_df.values.tolist())
+
+            # Apply formatting options for subsequent sheets
+            if options.get("auto_resize"):
+                new_worksheet.freeze(rows=1)
+                new_worksheet.format('A1:ZZZ1', {'textFormat': {'bold': True}})
+                new_worksheet.columns_auto_resize(0, len(processed_df.columns) - 1)
+            if options.get("freeze_header"):
+                new_worksheet.freeze(rows=1)
+            if options.get("add_timestamp"):
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                new_worksheet.update_cell(len(processed_df) + 2, 1, f"Processed on: {timestamp}")
+            
+            st.session_state.progress_bar.progress((i + 2) / len(dataframes), text=f"Uploading sheet '{sheet_name}' to Google Sheet")
+            time.sleep(0.1) # To prevent hitting API limits
+
+        st.success(f"✅ Successfully uploaded workbook '{workbook_name}' to Google Sheet: {spreadsheet.url}")
+        logger.info(f"Uploaded workbook '{workbook_name}' to {spreadsheet.url}")
+        return spreadsheet.url
+
     except Exception as e:
-        st.error(f"Error displaying preview: {e}")
+        st.error(f"❌ Failed to upload workbook '{workbook_name}' to Google Sheets: {str(e)}")
+        logger.error(f"Error uploading workbook '{workbook_name}': {str(e)}")
+        return ""
+
 
 # Main application logic
-st.title("🚀 Start Your Upload")
+def main():
+    if "progress_bar" not in st.session_state:
+        st.session_state.progress_bar = None
 
-if cred_file:
-    # Save credentials to a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp_cred_file:
-        temp_cred_file.write(cred_file.getvalue())
-        temp_cred_path = temp_cred_file.name
+    st.markdown("<div class=\"upload-section\">", unsafe_allow_html=True)
+    st.markdown("<h2>⬆️ Upload Your File</h2>", unsafe_allow_html=True)
+    uploaded_file = st.file_uploader(
+        "Choose an Excel (.xlsx, .xls) or CSV (.csv) file",
+        type=file_processor.supported_extensions,
+        accept_multiple_files=False,
+        help="Select a file to convert and upload to Google Sheets."
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    gsheet_client = get_gsheet_client(temp_cred_path)
+    if uploaded_file is not None:
+        file_validation = file_processor.validate_file(uploaded_file)
 
-    if gsheet_client:
-        st.success("✅ Google Sheets client authenticated successfully!")
-        
-        uploaded_files = st.file_uploader(
-            "Upload your CSV or Excel files",
-            type=file_processor.supported_extensions,
-            accept_multiple_files=True,
-            help="Drag and drop your files here. Supports CSV, XLSX, XLS."
-        )
+        if not file_validation["is_valid"]:
+            st.markdown(f"<div class=\"error-box\"><h3>File Validation Errors:</h3><ul>{''.join([f'<li>{issue}</li>' for issue in file_validation['issues']])}</ul></div>", unsafe_allow_html=True)
+            return
 
-        if uploaded_files:
-            st.session_state.progress_bar = st.progress(0, text="Starting file processing...")
-            all_processed_urls = []
-            total_files = len(uploaded_files)
+        if file_validation["warnings"]:
+            st.markdown(f"<div class=\"warning-box\"><h3>File Validation Warnings:</h3><ul>{''.join([f'<li>{warning}</li>' for warning in file_validation['warnings']])}</ul></div>", unsafe_allow_html=True)
 
-            for i, uploaded_file in enumerate(uploaded_files):
-                st.info(f"Processing file {i+1}/{total_files}: {uploaded_file.name}")
-                validation_result = file_processor.validate_file(uploaded_file)
+        st.markdown(f"<div class=\"info-box\"><b>File Info:</b> Name: {uploaded_file.name}, Type: {file_validation['file_type']}, Size: {file_validation['size_mb']:.2f} MB</div>", unsafe_allow_html=True)
 
-                if not validation_result['is_valid']:
-                    st.error(f"❌ Validation failed for {uploaded_file.name}: {', '.join(validation_result['issues'])}")
-                    continue
-                
-                if validation_result['warnings']:
-                    for warning in validation_result['warnings']:
-                        st.warning(f"⚠️ Warning for {uploaded_file.name}: {warning}")
+        if cred_file:
+            # Save credentials to a temporary file
+            with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as temp_cred_file:
+                temp_cred_file.write(cred_file.getvalue().decode("utf-8"))
+                temp_cred_path = temp_cred_file.name
 
-                file_content = uploaded_file.getvalue()
-                file_hash = file_processor.get_file_hash(file_content)
-                
-                display_file_preview(file_content, validation_result['file_type'])
+            client = get_gsheet_client(temp_cred_path)
+
+            if client:
+                st.markdown("<div class=\"progress-container\">", unsafe_allow_html=True)
+                st.session_state.progress_bar = st.progress(0, text="Starting upload...")
+                st.markdown("</div>", unsafe_allow_html=True)
 
                 try:
-                    if validation_result['file_type'] == ".csv":
+                    dataframes = {}
+                    if file_validation["file_type"] == ".csv":
                         dataframes = file_processor.read_csv_file(uploaded_file)
-                    elif validation_result['file_type'] in [".xlsx", ".xls"]:
+                    elif file_validation["file_type"] in [".xlsx", ".xls"]:
                         dataframes = file_processor.read_excel_file(uploaded_file)
+
+                    if dataframes:
+                        # Determine workbook name
+                        base_name = os.path.splitext(uploaded_file.name)[0]
+                        workbook_name = base_name
+                        if naming_convention == "with_timestamp":
+                            workbook_name = f"{base_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        elif naming_convention == "with_hash":
+                            workbook_name = f"{base_name}_{file_processor.get_file_hash(uploaded_file.getvalue())}"
+                        elif naming_convention == "custom_prefix":
+                            workbook_name = f"{custom_prefix}{base_name}"
+
+                        # Upload all dataframes to a single Google Sheet workbook
+                        uploaded_url = upload_dataframes_to_single_workbook(client, dataframes, workbook_name, {
+                            "share_email": share_email,
+                            "permission_level": permission_level,
+                            "notify_email": notify_email,
+                            "auto_resize": auto_resize,
+                            "freeze_header": freeze_header,
+                            "add_timestamp": add_timestamp,
+                            "remove_empty_rows": remove_empty_rows,
+                            "remove_empty_cols": remove_empty_cols,
+                            "convert_data_types": convert_data_types,
+                            "batch_size": batch_size
+                        }, DEFAULT_FOLDER_ID)
+
+                        if uploaded_url:
+                            st.markdown(f"<div class=\"success-box\"><h3>Upload Complete!</h3><p>Your workbook has been successfully uploaded to Google Sheets.</p><p><a href=\"{uploaded_url}\" target=\"_blank\" class=\"sheet-link\">Open Google Sheet</a></p></div>", unsafe_allow_html=True)
+
+                            # Display analysis for each sheet
+                            st.markdown("<h2>📊 Data Analysis Summary</h2>", unsafe_allow_html=True)
+                            for sheet_name, df in dataframes.items():
+                                analysis = file_processor.analyze_dataframe(df, sheet_name)
+                                st.markdown(f"<div class=\"info-box\"><h4>Sheet: {analysis['name']}</h4>", unsafe_allow_html=True)
+                                st.write(f"Rows: {analysis['rows']:,}, Columns: {analysis['columns']:,}")
+                                if analysis["issues"]:
+                                    st.markdown(f"<p style=\"color:red;\">Issues: {', '.join(analysis['issues'])}</p>", unsafe_allow_html=True)
+                                if analysis["warnings"]:
+                                    st.markdown(f"<p style=\"color:orange;\">Warnings: {', '.join(analysis['warnings'])}</p>", unsafe_allow_html=True)
+                                st.markdown("</div>", unsafe_allow_html=True)
+                                
+                                # Display sample data
+                                if not df.empty:
+                                    st.markdown(f"<h5>Sample Data for '{sheet_name}':</h5>", unsafe_allow_html=True)
+                                    st.markdown("<div class=\"preview-table\">", unsafe_allow_html=True)
+                                    st.dataframe(df.head())
+                                    st.markdown("</div>", unsafe_allow_html=True)
+
                     else:
-                        st.error(f"Unsupported file type for processing: {validation_result['file_type']}")
-                        continue
-
-                    for sheet_name, df in dataframes.items():
-                        analysis = file_processor.analyze_dataframe(df, sheet_name)
-                        st.write(f"### Analysis for sheet: {sheet_name}")
-                        st.json(analysis)
-
-                        if analysis['issues']:
-                            st.error(f"Sheet '{sheet_name}' has critical issues: {', '.join(analysis['issues'])}")
-                            continue
-
-                        # Determine sheet name based on convention
-                        final_sheet_name = sheet_name
-                        if st.session_state.get("naming_convention") == "with_timestamp":
-                            final_sheet_name = f"{sheet_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                        elif st.session_state.get("naming_convention") == "with_hash":
-                            final_sheet_name = f"{sheet_name}_{file_hash}"
-                        elif st.session_state.get("naming_convention") == "custom_prefix":
-                            final_sheet_name = f"{st.session_state.get('custom_prefix', 'Data_')}{sheet_name}"
-
-                        # Collect all options for upload
-                        upload_options = {
-                            "share_email": st.session_state.get("share_email", DEFAULT_EMAIL),
-                            "permission_level": st.session_state.get("permission_level", "writer"),
-                            "notify_email": st.session_state.get("notify_email", True),
-                            "auto_resize": st.session_state.get("auto_resize", True),
-                            "freeze_header": st.session_state.get("freeze_header", True),
-                            "add_timestamp": st.session_state.get("add_timestamp", True),
-                            "remove_empty_rows": st.session_state.get("remove_empty_rows", True),
-                            "remove_empty_cols": st.session_state.get("remove_empty_cols", True),
-                            "convert_data_types": st.session_state.get("convert_data_types", False),
-                            "batch_size": st.session_state.get("batch_size", 1000)
-                        }
-
-                        st.write(f"Attempting to upload sheet '{sheet_name}' to Google Sheets...")
-                        sheet_url = upload_dataframe_to_sheets(gsheet_client, df, final_sheet_name, upload_options, DEFAULT_FOLDER_ID)
-                        all_processed_urls.append(sheet_url)
-                        st.success(f"✅ Successfully uploaded '{sheet_name}' to [Google Sheet]({sheet_url})")
+                        st.markdown("<div class=\"error-box\">No dataframes were read from the uploaded file.</div>", unsafe_allow_html=True)
 
                 except Exception as e:
-                    st.error(f"❌ Error processing {uploaded_file.name}: {str(e)}")
-                    logger.error(f"Error processing {uploaded_file.name}: {e}", exc_info=True)
+                    st.markdown(f"<div class=\"error-box\">An error occurred during processing: {str(e)}</div>", unsafe_allow_html=True)
+                finally:
+                    # Clean up temporary credential file
+                    if os.path.exists(temp_cred_path):
+                        os.remove(temp_cred_path)
+            else:
+                st.markdown("<div class=\"error-box\">Google Sheets client could not be initialized. Please check your credentials.</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class=\"warning-box\">Please upload your Google Service Account JSON credentials to proceed.</div>", unsafe_allow_html=True)
 
-            st.session_state.progress_bar.progress(1.0, text="All files processed!")
-            st.balloons()
-
-            st.subheader("All Processed Sheets:")
-            for url in all_processed_urls:
-                st.markdown(f"<a href=\"{url}\" target=\"_blank\" class=\"sheet-link\">Open Sheet</a>", unsafe_allow_html=True)
-
-    # Clean up temporary credentials file
-    os.remove(temp_cred_path)
-
-else:
-    st.info("Please upload your Google Service Account JSON credentials in the sidebar to get started.")
-    st.markdown("""
-    <div class="info-box">
-        <h3>Getting Started:</h3>
-        <ol>
-            <li>Upload your Google Service Account JSON file in the sidebar.</li>
-            <li>Configure sharing and processing options.</li>
-            <li>Upload your CSV or Excel files to convert them to Google Sheets.</li>
-        </ol>
-        <p>Need help? Refer to the <a href="https://cloud.google.com/docs/authentication/getting-started" target="_blank">Google Cloud documentation</a> for service account setup.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
+if __name__ == "__main__":
+    main()
 
