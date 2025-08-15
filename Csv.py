@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Excel to Google Sheets", layout="wide")
-st.title("📄 Excel to Google Sheets Uploader (No NaN Errors)")
+st.title("📄 Excel to Google Sheets Uploader (Full Workbook)")
 
 # ---- Function to clean DataFrame ----
 def clean_for_gsheets(df):
@@ -15,7 +16,7 @@ def clean_for_gsheets(df):
     return df
 
 # ---- File uploader ----
-uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel Workbook", type=["xlsx"])
 
 if uploaded_file:
     try:
@@ -23,41 +24,50 @@ if uploaded_file:
         xls = pd.ExcelFile(uploaded_file)
         st.success(f"✅ Found {len(xls.sheet_names)} sheets: {', '.join(xls.sheet_names)}")
 
-        cleaned_sheets = {}
-        for sheet in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name=sheet, dtype=str)
-            df = df.fillna("")  # Remove NaN
-            df = clean_for_gsheets(df)
-            cleaned_sheets[sheet] = df
-
+        # Preview first sheet
+        first_df = pd.read_excel(xls, sheet_name=xls.sheet_names[0], dtype=str).fillna("")
         st.info("📊 Preview of first sheet:")
-        st.dataframe(cleaned_sheets[xls.sheet_names[0]])
+        st.dataframe(first_df)
 
-        # ---- Google Sheets Upload ----
+        # ---- Google Sheets Auth ----
         st.subheader("🔑 Google Sheets Authentication")
         service_account_file = st.file_uploader("Upload Google Service Account JSON", type=["json"])
-        
+
         if service_account_file is not None:
-            # Authenticate with Google Sheets
+            creds_dict = json.load(service_account_file)
             creds = Credentials.from_service_account_info(
-                pd.read_json(service_account_file).to_dict(),
+                creds_dict,
                 scopes=["https://www.googleapis.com/auth/spreadsheets"]
             )
             client = gspread.authorize(creds)
 
-            # Select Spreadsheet
-            sheet_name = st.text_input("Google Spreadsheet Name:", value="My Google Sheet")
-            if st.button("🚀 Upload to Google Sheets"):
-                try:
-                    spreadsheet = client.open(sheet_name)
-                    worksheet = spreadsheet.sheet1
+            # Spreadsheet name input
+            sheet_name = st.text_input("Google Spreadsheet Name:", value="My Uploaded Workbook")
 
-                    # Upload first sheet only (could be extended to all)
-                    worksheet.update(
-                        [cleaned_sheets[xls.sheet_names[0]].columns.values.tolist()] +
-                        cleaned_sheets[xls.sheet_names[0]].values.tolist()
-                    )
-                    st.success("✅ Data uploaded successfully without NaN errors!")
+            if st.button("🚀 Upload Workbook to Google Sheets"):
+                try:
+                    try:
+                        spreadsheet = client.open(sheet_name)
+                    except gspread.SpreadsheetNotFound:
+                        spreadsheet = client.create(sheet_name)
+                        st.info("Created new Google Sheet.")
+
+                    # Loop through all Excel sheets
+                    for sheet in xls.sheet_names:
+                        df = pd.read_excel(xls, sheet_name=sheet, dtype=str).fillna("")
+                        df = clean_for_gsheets(df)
+
+                        # Create or clear worksheet
+                        try:
+                            worksheet = spreadsheet.worksheet(sheet)
+                            worksheet.clear()
+                        except gspread.WorksheetNotFound:
+                            worksheet = spreadsheet.add_worksheet(title=sheet, rows=str(len(df)+10), cols=str(len(df.columns)+5))
+
+                        # Upload cleaned data
+                        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+
+                    st.success("✅ Entire workbook uploaded successfully!")
                 except Exception as e:
                     st.error(f"❌ Failed to upload: {e}")
 
