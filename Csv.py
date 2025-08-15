@@ -13,6 +13,7 @@ import zipfile
 from typing import Dict, List, Any, Optional, Tuple
 import logging
 import hashlib
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -301,7 +302,7 @@ class FileProcessor:
                         clean_name = self.clean_sheet_name(sheet_name)
                         dataframes[clean_name] = df
                 except Exception as e:
-                    st.warning(f"Could not read sheet '{sheet_name}': {str(e)}")
+                    st.warning(f"Could not read sheet \'{sheet_name}\': {str(e)}")
                     continue
             
             if not dataframes:
@@ -353,7 +354,7 @@ class FileProcessor:
             analysis["null_counts"][col] = null_count
             
             if null_count > len(df) * 0.5:
-                analysis["warnings"].append(f"Column '{col}' has >50% null values")
+                analysis["warnings"].append(f"Column \'{col}\' has >50% null values")
         
         # Check for issues
         if df.columns.duplicated().any():
@@ -517,6 +518,7 @@ def format_dataframe(df: pd.DataFrame, options: Dict[str, Any]) -> pd.DataFrame:
 
     return processed_df
 
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10), retry=retry_if_exception_type(gspread.exceptions.APIError))
 def upload_dataframe_to_sheets(client: gspread.Client, df: pd.DataFrame, sheet_name: str, options: Dict[str, Any], folder_id: str = "") -> str:
     """Uploads a Pandas DataFrame to a new Google Sheet, with advanced features"""
     try:
@@ -540,8 +542,7 @@ def upload_dataframe_to_sheets(client: gspread.Client, df: pd.DataFrame, sheet_n
         batch_size = options.get("batch_size", 1000)
 
         # Prepare header
-        header = [str(col) for col in processed_df.columns]
-        worksheet.update(f'A1:{gspread.utils.rowcol_to_a1(1, total_cols)}', [header])
+        worksheet.update(range_name=f'A1:{gspread.utils.rowcol_to_a1(1, total_cols)}', values=[[str(col) for col in processed_df.columns]])
 
         # Upload data in batches
         for i in range(0, total_rows, batch_size):
@@ -549,8 +550,7 @@ def upload_dataframe_to_sheets(client: gspread.Client, df: pd.DataFrame, sheet_n
             values = batch_df.values.tolist()
             start_row = i + 2 # +1 for 0-index to 1-index, +1 for header row
             end_row = start_row + len(values) - 1
-            range_name = f'A{start_row}:{gspread.utils.rowcol_to_a1(end_row, total_cols)}'
-            worksheet.update(range_name, values)
+            worksheet.update(range_name=f'A{start_row}:{gspread.utils.rowcol_to_a1(end_row, total_cols)}', values=values)
             st.session_state.progress_bar.progress((i + len(values)) / total_rows, text=f"Uploading data: {i + len(values)}/{total_rows} rows")
             time.sleep(0.1) # To prevent hitting API limits
 
@@ -571,11 +571,21 @@ def upload_dataframe_to_sheets(client: gspread.Client, df: pd.DataFrame, sheet_n
         logger.info(f"Uploaded '{sheet_name}' to {spreadsheet.url}")
         return spreadsheet.url
 
+    except gspread.exceptions.APIError as e:
+        try:
+            error_details = e.response.json()
+            error_message = error_details.get('error', {}).get('message', str(e))
+        except:
+            error_message = str(e)
+        st.error(f"❌ Failed to upload '{sheet_name}' to Google Sheets: APIError: {error_message}")
+        logger.error(f"Error uploading '{sheet_name}': {error_message}")
+        raise # Re-raise the exception to trigger retry
     except Exception as e:
         st.error(f"❌ Failed to upload '{sheet_name}' to Google Sheets: {str(e)}")
         logger.error(f"Error uploading '{sheet_name}': {str(e)}")
         return ""
 
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10), retry=retry_if_exception_type(gspread.exceptions.APIError))
 def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dict[str, pd.DataFrame], workbook_name: str, options: Dict[str, Any], folder_id: str = "") -> str:
     """Uploads multiple Pandas DataFrames to a single new Google Sheet workbook, each as a separate worksheet.
     The first DataFrame in the dictionary will be uploaded to the default 'Sheet1' worksheet, which will be renamed.
@@ -604,7 +614,7 @@ def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dic
         worksheet.resize(rows=num_rows, cols=num_cols)
 
         processed_df = format_dataframe(first_df, options)
-        worksheet.update([processed_df.columns.values.tolist()] + processed_df.values.tolist())
+        worksheet.update(values=[processed_df.columns.values.tolist()] + processed_df.values.tolist(), range_name=f'A1:{gspread.utils.rowcol_to_a1(num_rows, num_cols)}')
         
         # Apply formatting options for the first sheet
         if options.get("auto_resize"):
@@ -617,7 +627,7 @@ def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dic
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             worksheet.update_cell(len(processed_df) + 2, 1, f"Processed on: {timestamp}")
 
-        st.session_state.progress_bar.progress(1 / len(dataframes), text=f"Uploading sheet '{first_sheet_name}' to Google Sheet")
+        st.session_state.progress_bar.progress(1 / len(dataframes), text=f"Uploading sheet \'{first_sheet_name}\' to Google Sheet")
 
         # Add and upload subsequent DataFrames as new worksheets
         for i, (sheet_name, df) in enumerate(list(dataframes.items())[1:]):
@@ -629,7 +639,7 @@ def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dic
             new_worksheet.resize(rows=num_rows, cols=num_cols)
 
             processed_df = format_dataframe(df, options)
-            new_worksheet.update([processed_df.columns.values.tolist()] + processed_df.values.tolist())
+            new_worksheet.update(values=[processed_df.columns.values.tolist()] + processed_df.values.tolist(), range_name=f'A1:{gspread.utils.rowcol_to_a1(num_rows, num_cols)}')
 
             # Apply formatting options for subsequent sheets
             if options.get("auto_resize"):
@@ -642,16 +652,25 @@ def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dic
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 new_worksheet.update_cell(len(processed_df) + 2, 1, f"Processed on: {timestamp}")
             
-            st.session_state.progress_bar.progress((i + 2) / len(dataframes), text=f"Uploading sheet '{sheet_name}' to Google Sheet")
+            st.session_state.progress_bar.progress((i + 2) / len(dataframes), text=f"Uploading sheet \'{sheet_name}\' to Google Sheet")
             time.sleep(0.1) # To prevent hitting API limits
 
-        st.success(f"✅ Successfully uploaded workbook '{workbook_name}' to Google Sheet: {spreadsheet.url}")
-        logger.info(f"Uploaded workbook '{workbook_name}' to {spreadsheet.url}")
+        st.success(f"✅ Successfully uploaded workbook \'{workbook_name}\' to Google Sheet: {spreadsheet.url}")
+        logger.info(f"Uploaded workbook \'{workbook_name}\' to {spreadsheet.url}")
         return spreadsheet.url
 
+    except gspread.exceptions.APIError as e:
+        try:
+            error_details = e.response.json()
+            error_message = error_details.get('error', {}).get('message', str(e))
+        except:
+            error_message = str(e)
+        st.error(f"❌ Failed to upload workbook \'{workbook_name}\' to Google Sheets: APIError: {error_message}")
+        logger.error(f"Error uploading workbook \'{workbook_name}\' to Google Sheets: {error_message}")
+        raise # Re-raise the exception to trigger retry
     except Exception as e:
-        st.error(f"❌ Failed to upload workbook '{workbook_name}' to Google Sheets: {str(e)}")
-        logger.error(f"Error uploading workbook '{workbook_name}': {str(e)}")
+        st.error(f"❌ Failed to upload workbook \'{workbook_name}\' to Google Sheets: {str(e)}")
+        logger.error(f"Error uploading workbook \'{workbook_name}\' to Google Sheets: {str(e)}")
         return ""
 
 
@@ -737,14 +756,14 @@ def main():
                                 st.markdown(f"<div class=\"info-box\"><h4>Sheet: {analysis['name']}</h4>", unsafe_allow_html=True)
                                 st.write(f"Rows: {analysis['rows']:,}, Columns: {analysis['columns']:,}")
                                 if analysis["issues"]:
-                                    st.markdown(f"<p style=\"color:red;\">Issues: {', '.join(analysis['issues'])}</p>", unsafe_allow_html=True)
+                                    st.markdown(f"<p style=\"color:red;\">Issues: {''.join(analysis['issues'])}</p>", unsafe_allow_html=True)
                                 if analysis["warnings"]:
-                                    st.markdown(f"<p style=\"color:orange;\">Warnings: {', '.join(analysis['warnings'])}</p>", unsafe_allow_html=True)
+                                    st.markdown(f"<p style=\"color:orange;\">Warnings: {''.join(analysis['warnings'])}</p>", unsafe_allow_html=True)
                                 st.markdown("</div>", unsafe_allow_html=True)
                                 
                                 # Display sample data
                                 if not df.empty:
-                                    st.markdown(f"<h5>Sample Data for '{sheet_name}':</h5>", unsafe_allow_html=True)
+                                    st.markdown(f"<h5>Sample Data for \'{sheet_name}\':</h5>", unsafe_allow_html=True)
                                     st.markdown("<div class=\"preview-table\">", unsafe_allow_html=True)
                                     st.dataframe(df.head())
                                     st.markdown("</div>", unsafe_allow_html=True)
