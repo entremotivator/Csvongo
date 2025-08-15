@@ -598,6 +598,11 @@ def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dic
         worksheet = spreadsheet.worksheet("Sheet1")
         worksheet.update_title(first_sheet_name)
         
+        # Resize the worksheet to fit the data before updating
+        num_rows = len(first_df) + 1  # +1 for header
+        num_cols = len(first_df.columns)
+        worksheet.resize(rows=num_rows, cols=num_cols)
+
         processed_df = format_dataframe(first_df, options)
         worksheet.update([processed_df.columns.values.tolist()] + processed_df.values.tolist())
         
@@ -617,6 +622,12 @@ def upload_dataframes_to_single_workbook(client: gspread.Client, dataframes: Dic
         # Add and upload subsequent DataFrames as new worksheets
         for i, (sheet_name, df) in enumerate(list(dataframes.items())[1:]):
             new_worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
+            
+            # Resize the new worksheet to fit the data before updating
+            num_rows = len(df) + 1  # +1 for header
+            num_cols = len(df.columns)
+            new_worksheet.resize(rows=num_rows, cols=num_cols)
+
             processed_df = format_dataframe(df, options)
             new_worksheet.update([processed_df.columns.values.tolist()] + processed_df.values.tolist())
 
